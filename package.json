@@ -1,0 +1,38 @@
+{
+  "name": "eden-net",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/izybelly/EDEN-net#readme",
+  "bugs": {
+    "url": "https://github.com/izybelly/EDEN-net/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/izybelly/EDEN-net.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "tbill-fetch-tvl": "npm run build --silent && node dist/scripts/TBILL/perf/fetchTVL.ts",
+    "tbill-fetch-mint-redeem": "npm run build --silent && node dist/scripts/TBILL/perf/fetchMintAndRedeem.ts",
+    "tbill-fetch-unique-holders": "npm run build --silent && node dist/scripts/TBILL/perf/fetchUniqueHolders.ts",
+    "usdo-collteral-asset-allocation": "npm run build --silent && node dist/scripts/USDO/risk/fetchCollateralAndAssetAllocation.ts",
+    "fetch-all": "npm run dune:fetch && npm run tbill-fetch-tvl && npm run tbill-fetch-mint-redeem && npm run tbill-fetch-unique-holders && npm run usdo-collteral-asset-allocation",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.98.4",
+    "dotenv": "^17.2.3",
+    "ethers": "^6.16.0",
+    "mongodb": "^7.0.0",
+    "xrpl": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.6",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}

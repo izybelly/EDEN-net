@@ -1,0 +1,30 @@
+name: dune-run
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *" # hourly
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build (tsc -> dist/)
+        run: npm run build
+
+      - name: Run fetcher
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          XRPL_RPC_URL: ${{ vars.XRPL_RPC_URL }}
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+        run: npm run fetch-all
