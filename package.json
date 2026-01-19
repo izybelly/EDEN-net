@@ -16,10 +16,10 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "tbill-fetch-tvl": "npm run build --silent && node dist/scripts/TBILL/perf/fetchTVL.ts",
-    "tbill-fetch-mint-redeem": "npm run build --silent && node dist/scripts/TBILL/perf/fetchMintAndRedeem.ts",
-    "tbill-fetch-unique-holders": "npm run build --silent && node dist/scripts/TBILL/perf/fetchUniqueHolders.ts",
-    "usdo-collteral-asset-allocation": "npm run build --silent && node dist/scripts/USDO/risk/fetchCollateralAndAssetAllocation.ts",
+    "tbill-fetch-tvl": "npm run build --silent && node dist/scripts/TBILL/perf/fetchTVL.js",
+    "tbill-fetch-mint-redeem": "npm run build --silent && node dist/scripts/TBILL/perf/fetchMintAndRedeem.js",
+    "tbill-fetch-unique-holders": "npm run build --silent && node dist/scripts/TBILL/perf/fetchUniqueHolders.js",
+    "usdo-collteral-asset-allocation": "npm run build --silent && node dist/scripts/USDO/risk/fetchCollateralAndAssetAllocation.js",
     "fetch-all": "npm run tbill-fetch-tvl && npm run tbill-fetch-mint-redeem && npm run tbill-fetch-unique-holders && npm run usdo-collteral-asset-allocation",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
