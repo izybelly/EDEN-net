@@ -20,6 +20,7 @@
     "tbill-fetch-mint-redeem": "npm run build --silent && node dist/scripts/TBILL/perf/fetchMintAndRedeem.js",
     "tbill-fetch-unique-holders": "npm run build --silent && node dist/scripts/TBILL/perf/fetchUniqueHolders.js",
     "usdo-collteral-asset-allocation": "npm run build --silent && node dist/scripts/USDO/risk/fetchCollateralAndAssetAllocation.js",
+    "fetch-risk": "npm run usdo-collteral-asset-allocation",
     "fetch-all": "npm run tbill-fetch-tvl && npm run tbill-fetch-mint-redeem && npm run tbill-fetch-unique-holders && npm run usdo-collteral-asset-allocation",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
