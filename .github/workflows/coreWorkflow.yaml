@@ -27,4 +27,4 @@ jobs:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           XRPL_RPC_URL: ${{ vars.XRPL_RPC_URL }}
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
-        run: npm run fetch-risk
+        run: npm run fetch-usdo-risk
