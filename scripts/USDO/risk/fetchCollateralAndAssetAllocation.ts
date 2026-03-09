@@ -126,8 +126,12 @@ async function main() {
   try {
     const col = client.db(MONGODB_DB).collection(MONGODB_COLLECTION);
 
+    // Normalize to date-only key so each calendar day has exactly one document
+    const dateKey = new Date(assetAllocation.date).toISOString().slice(0, 10);
+
     const doc = {
       date: assetAllocation.date,
+      dateKey,
       totalUsdoAmount: assetAllocation.totalUsdoAmount,
       totalReserveUsd: assetAllocation.totalReserveUsd,
       collateralRatio: assetAllocation.collateralRatio,
@@ -137,14 +141,17 @@ async function main() {
     };
 
     const result = await col.replaceOne(
-      { date: assetAllocation.date },
+      { dateKey },
       doc,
       { upsert: true }
     );
-    console.log(`Upserted: ${result.upsertedCount} / Matched: ${result.matchedCount}`);
+    console.log(`Upserted: ${result.upsertedCount} / Matched: ${result.matchedCount} (dateKey: ${dateKey})`);
   } finally {
     await client.close();
   }
 }
 
-main().catch(console.error);
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
