@@ -126,12 +126,8 @@ async function main() {
   try {
     const col = client.db(MONGODB_DB).collection(MONGODB_COLLECTION);
 
-    const date = new Date(assetAllocation.date);
-    const dateKey = date.toISOString().slice(0, 10);
-
     const doc = {
-      date,
-      dateKey,
+      date: new Date(assetAllocation.date),
       totalUsdoAmount: assetAllocation.totalUsdoAmount,
       totalReserveUsd: assetAllocation.totalReserveUsd,
       collateralRatio: assetAllocation.collateralRatio,
@@ -140,12 +136,8 @@ async function main() {
       settlementRatios: assetAllocation.settlementRatios,
     };
 
-    const result = await col.replaceOne(
-      { dateKey },
-      doc,
-      { upsert: true }
-    );
-    console.log(`Upserted: ${result.upsertedCount} / Matched: ${result.matchedCount} (dateKey: ${dateKey})`);
+    const result = await col.insertOne(doc);
+    console.log(`Inserted: ${result.insertedId}`);
   } finally {
     await client.close();
   }
