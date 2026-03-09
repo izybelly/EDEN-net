@@ -3,7 +3,7 @@ name: dune-run
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *" # hourly
+    - cron: "0 0 * * *" # daily at midnight UTC
 
 jobs:
   run:
