@@ -1,4 +1,4 @@
-name: dune-run
+name: daily-risk-snapshots
 
 on:
   workflow_dispatch:
