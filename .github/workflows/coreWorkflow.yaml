@@ -22,9 +22,16 @@ jobs:
       - name: Build (tsc -> dist/)
         run: npm run build
 
-      - name: Run fetcher
+      - name: Fetch USDO risk
         env:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           XRPL_RPC_URL: ${{ vars.XRPL_RPC_URL }}
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
         run: npm run fetch-usdo-risk
+
+      - name: Fetch PRISM risk
+        env:
+          HARUKO_BEARER_TOKEN: ${{ secrets.HARUKO_BEARER_TOKEN }}
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+        run: npm run fetch-prism-risk
