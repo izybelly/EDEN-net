@@ -126,10 +126,13 @@ async function main() {
   try {
     const col = client.db(MONGODB_DB).collection(MONGODB_COLLECTION);
 
+    const now = new Date();
     const date = new Date(assetAllocation.date);
     const dateKey = date.toISOString().slice(0, 10);
+    const snapshotId = now.toISOString();
 
     const doc = {
+      snapshotId,
       date,
       dateKey,
       totalUsdoAmount: assetAllocation.totalUsdoAmount,
@@ -140,8 +143,19 @@ async function main() {
       settlementRatios: assetAllocation.settlementRatios,
     };
 
-    const result = await col.replaceOne({ dateKey }, doc, { upsert: true });
-    console.log(`Upserted: ${result.upsertedCount} / Matched: ${result.matchedCount} (${dateKey})`);
+    // Drop old unique dateKey index if it exists (was one-per-day, now allows multiple)
+    try { await col.dropIndex("dateKey_1"); } catch (_) { /* may not exist */ }
+
+    const result = await col.insertOne(doc);
+    console.log(`Inserted: ${result.insertedId} (${snapshotId})`);
+
+    // Ensure indexes — snapshotId is unique (partial: only docs that have it), dateKey for day queries
+    await col.createIndex(
+      { snapshotId: 1 },
+      { unique: true, partialFilterExpression: { snapshotId: { $exists: true } } }
+    );
+    await col.createIndex({ dateKey: 1 });
+    await col.createIndex({ date: 1 });
   } finally {
     await client.close();
   }

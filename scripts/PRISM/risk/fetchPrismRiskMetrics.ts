@@ -360,17 +360,58 @@ async function fetchLoans(): Promise<any> {
   return harukoFetch("/api/loans");
 }
 
-async function fetchDefiDeployments(): Promise<any> {
-  if (DEFI_WALLET_ADDRESSES.length === 0) {
-    return null;
+// Get DeFi venue account IDs from STRATEGY_BUCKET_ACCOUNTS
+function getDefiAccountIds(venueAccounts: Record<string, VenueAccount>): number[] {
+  const defiAccountNames = [
+    ...(STRATEGY_BUCKET_ACCOUNTS["Prism DEFI"] ?? []),
+    ...(STRATEGY_BUCKET_ACCOUNTS["Prism Overcollaterized Lending"] ?? []),
+  ];
+  const ids: number[] = [];
+  for (const name of defiAccountNames) {
+    if (venueAccounts[name]) {
+      ids.push(venueAccounts[name].id);
+    }
+  }
+  return ids;
+}
+
+async function fetchDefiDeployments(venueAccounts: Record<string, VenueAccount>): Promise<any> {
+  const defiIds = getDefiAccountIds(venueAccounts);
+  if (defiIds.length === 0) return null;
+
+  // Primary: /api/summary/accounts with DeFi venue account IDs
+  try {
+    const ids = defiIds.join(",");
+    const data = await harukoFetch("/api/summary/accounts", {
+      venueAccountIds: ids,
+      equitySummaryStartTs: "90000000000000",
+    });
+    // Build deployments array from venue wallet inventory
+    const venues: any[] = data.venues ?? [];
+    const deployments: any[] = [];
+    for (const venue of venues) {
+      const wi: any[] = venue.walletInventory ?? [];
+      const equityUSD = wi.reduce((s: number, t: any) => s + (t.equity ?? 0) * (t.refPx ?? 0), 0);
+      if (equityUSD > 0.01) {
+        deployments.push({
+          protocol: venue.venueAccount ?? venue.venue ?? "unknown",
+          suppliedUSD: equityUSD,
+          borrowedUSD: 0,
+          equityUSD,
+        });
+      }
+    }
+    if (deployments.length > 0) return { deployments };
+  } catch (e: any) {
+    console.warn(`[defi/summary_accounts] ${e.message}`);
   }
 
-  // Try /api/defi/wallet_deployments first
+  // Fallback: /api/defi/wallet_deployments with wallet addresses
   try {
     const addrs = DEFI_WALLET_ADDRESSES.join(",");
     return await harukoFetch("/api/defi/wallet_deployments", { walletAddresses: addrs });
-  } catch {
-    // Fallback: wallet_deployments returns 500 — use /api/balance per DeFi wallet instead
+  } catch (e: any) {
+    console.warn(`[defi/wallet_deployments] ${e.message}`);
   }
 
   return null;
@@ -924,13 +965,20 @@ function computeDefiLeverage(data: any): {
     let borrowedUSD = 0;
     const protocol: string = deployment.protocol ?? deployment.name ?? "unknown";
 
-    const tokens: any[] = deployment.tokens ?? [];
-    for (const token of tokens) {
-      const balanceUSD = Math.abs((token.token?.balance ?? 0) * (token.token?.refPx ?? 0));
-      if (token.deploymentTokenType === "DEPLOYMENTEXPOSURE") {
-        suppliedUSD += balanceUSD;
-      } else if (token.deploymentTokenType === "DEPLOYMENTREWARD") {
-        borrowedUSD += balanceUSD;
+    // Use pre-computed suppliedUSD/borrowedUSD from /api/summary/accounts if available
+    if (deployment.suppliedUSD > 0 || deployment.borrowedUSD > 0) {
+      suppliedUSD = deployment.suppliedUSD ?? 0;
+      borrowedUSD = deployment.borrowedUSD ?? 0;
+    } else {
+      // Fallback: derive from token-level data (/api/defi/wallet_deployments format)
+      const tokens: any[] = deployment.tokens ?? [];
+      for (const token of tokens) {
+        const balanceUSD = Math.abs((token.token?.balance ?? 0) * (token.token?.refPx ?? 0));
+        if (token.deploymentTokenType === "DEPLOYMENTEXPOSURE") {
+          suppliedUSD += balanceUSD;
+        } else if (token.deploymentTokenType === "DEPLOYMENTREWARD") {
+          borrowedUSD += balanceUSD;
+        }
       }
     }
 
@@ -1098,6 +1146,8 @@ async function main() {
     console.warn("No Cash & Carry venue accounts found — positions/funding won't be fetched");
   }
   console.log(`All CeFi venue account IDs: [${allCefiIds.join(", ")}]`);
+  const defiIds = getDefiAccountIds(venueAccounts);
+  console.log(`DeFi venue account IDs: [${defiIds.join(", ")}]`);
 
   // 2. Fetch PRISM reserve API (authoritative) + all Haruko endpoints concurrently
   const [
@@ -1118,7 +1168,7 @@ async function main() {
     safeFetch("strategy_summaries", fetchStrategySummaries),
     safeFetch("aggregate/position", () => fetchAggregatePositions(ccAccountIds)),
     safeFetch("loans", fetchLoans),
-    safeFetch("defi/deployments", fetchDefiDeployments),
+    safeFetch("defi/deployments", () => fetchDefiDeployments(venueAccounts)),
     safeFetch("strategy/pnl_curves", fetchStrategyPnlFromCurves),
     safeFetch("transfers", () => fetchTransfers(allCefiIds)),
     safeFetch("balance_adjustments", () => fetchBalanceAdjustments(ccAccountIds)),
@@ -1215,6 +1265,7 @@ async function main() {
   const now = new Date();
   const date = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const dateKey = date.toISOString().slice(0, 10);
+  const snapshotId = now.toISOString(); // unique per run — allows multiple snapshots per day
 
   // Build strategy allocation array
   const strategies: any[] = [];
@@ -1266,6 +1317,7 @@ async function main() {
     }));
 
   const doc = {
+    snapshotId,
     date,
     dateKey,
 
@@ -1330,11 +1382,19 @@ async function main() {
   try {
     const db = client.db(MONGODB_DB);
     const col = db.collection(MONGODB_COLLECTION);
-    const result = await col.replaceOne({ dateKey }, doc, { upsert: true });
-    console.log(`[${MONGODB_COLLECTION}] Upserted: ${result.upsertedCount} / Matched: ${result.matchedCount} (${dateKey})`);
 
-    // Ensure indexes
-    await col.createIndex({ dateKey: 1 }, { unique: true });
+    // Drop old unique dateKey index if it exists (was one-per-day, now allows multiple)
+    try { await col.dropIndex("dateKey_1"); } catch (_) { /* may not exist */ }
+
+    const result = await col.insertOne(doc);
+    console.log(`[${MONGODB_COLLECTION}] Inserted: ${result.insertedId} (${snapshotId})`);
+
+    // Ensure indexes — snapshotId is unique (partial: only docs that have it), dateKey for day queries
+    await col.createIndex(
+      { snapshotId: 1 },
+      { unique: true, partialFilterExpression: { snapshotId: { $exists: true } } }
+    );
+    await col.createIndex({ dateKey: 1 });
     await col.createIndex({ date: 1 });
 
     // ── Pretty-print full summary ────────────────────────────────────
