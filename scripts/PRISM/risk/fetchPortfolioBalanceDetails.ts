@@ -26,8 +26,8 @@ const DUNE_API_KEY = process.env.DUNE_API_KEY!;
 const DUNE_BASE = "https://api.dune.com/api/v1";
 
 // Saved Dune query IDs (created once, executed each run)
-const DUNE_QUERY_LIT_PRICE = 6914770;       // LIT (Lighter) token price from prices.latest
-const DUNE_QUERY_LIGHTER_NET_USDC = 6914771; // Net USDC in Lighter DEX for wallet 0xd225ea
+const DUNE_QUERY_LIT_PRICE = 6914770; // LIT (Lighter) token price from prices.latest
+// Lighter LP position is tracked via Haruko venue "Prism Lighter" (more accurate than Dune flow)
 
 // LIT staking: separate wallet not tracked by Ethplorer wallet list
 const LIT_STAKING_QUANTITY = 1094.0;
@@ -50,7 +50,7 @@ const ONCHAIN_WALLETS: {
   { strategy: "DeFi",  deployment: "SNUSD",          address: "0xd29fda60ab08b540d38300649af706ada9da1331", harukoVenueName: "PRISM Monarq Operations (Neutrl) Position" },
   { strategy: "DeFi",  deployment: "Steakhouse AUSD",address: "0x72ac7351fa9c064b89fb8344cc920553300af6b4", harukoVenueName: "PRISM Monarq Steakhouse AUSD Position" },
   { strategy: "Overcollateralized Lending", deployment: "Maple",                address: "0x9f78d300b9b8804107930a40b09f73e7b0f85dcc" },
-  { strategy: "Cash & Carry",               deployment: "Lighter (USDC & ETH)", address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57" },
+  { strategy: "Cash & Carry",               deployment: "Lighter",              address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57", harukoVenueName: "Prism Lighter" },
 ];
 
 // ═══════════════════════════════════════════════════════════════════
@@ -272,8 +272,7 @@ interface TokenBalance {
 
 async function fetchWalletBalances(
   address: string,
-  provider: ethers.JsonRpcProvider,
-  lighterNetUsdc: number
+  provider: ethers.JsonRpcProvider
 ): Promise<{ totalUSD: number; tokens: TokenBalance[] }> {
   const res = await fetch(
     `${ETHPLORER_BASE}/getAddressInfo/${address}?apiKey=${ETHPLORER_KEY}`,
@@ -284,7 +283,6 @@ async function fetchWalletBalances(
 
   const tokens: TokenBalance[] = [];
   let totalUSD = 0;
-  const isLighter = address.toLowerCase() === "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57";
 
   // ETH balance
   const ethInfo = data.ETH ?? {};
@@ -325,18 +323,6 @@ async function fetchWalletBalances(
     totalUSD += usdValue;
   }
 
-  // Lighter: add net USDC deployed in Lighter DEX (from Dune)
-  if (isLighter && lighterNetUsdc > 0) {
-    tokens.push({
-      asset: "USDC (in Lighter DEX)",
-      contractAddress: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-      balance: lighterNetUsdc,
-      usdValue: lighterNetUsdc,
-      priceSource: "dune-flow",
-    });
-    totalUSD += lighterNetUsdc;
-  }
-
   return { totalUSD, tokens };
 }
 
@@ -349,16 +335,13 @@ async function main() {
 
   const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL!);
 
-  // ── 1. Fetch Dune data (LIT price + Lighter net USDC) in parallel ──
-  console.log("[Dune] Fetching LIT price and Lighter net USDC...");
-  const [litRows, lighterRows] = await Promise.all([
-    duneExecuteAndFetch(DUNE_QUERY_LIT_PRICE).catch((e) => { console.warn(`[Dune/LIT] ${e.message}`); return []; }),
-    duneExecuteAndFetch(DUNE_QUERY_LIGHTER_NET_USDC).catch((e) => { console.warn(`[Dune/Lighter] ${e.message}`); return []; }),
-  ]);
+  // ── 1. Fetch Dune LIT price ────────────────────────────────────────
+  // (Lighter LP position is now fetched directly from Haruko venue 472)
+  console.log("[Dune] Fetching LIT price...");
+  const litRows = await duneExecuteAndFetch(DUNE_QUERY_LIT_PRICE)
+    .catch((e) => { console.warn(`[Dune/LIT] ${e.message}`); return []; });
   const litPriceUSD: number = litRows[0]?.price ?? 0;
-  const lighterNetUsdc: number = Math.max(0, lighterRows[0]?.net_usdc_in_lighter ?? 0);
   console.log(`  LIT price: $${litPriceUSD.toFixed(4)}`);
-  console.log(`  Lighter net USDC: $${lighterNetUsdc.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
 
   // ── 2. FalconX CEX balances ────────────────────────────────────────
   let cexPositions: any[] = [];
@@ -458,7 +441,7 @@ async function main() {
       continue;
     }
     try {
-      const { totalUSD, tokens } = await fetchWalletBalances(w.address, provider, lighterNetUsdc);
+      const { totalUSD, tokens } = await fetchWalletBalances(w.address, provider);
       onchainResults.push({ strategy: w.strategy, deployment: w.deployment, address: w.address, totalUSD, tokens });
       console.log(`  ${w.deployment}: $${totalUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
       await new Promise((r) => setTimeout(r, 500)); // Ethplorer rate limit
@@ -524,7 +507,7 @@ async function main() {
       strategy: r.strategy, deployment: r.deployment, address: r.address,
       totalUSD: r.totalUSD, tokens: r.tokens, ...(r.error ? { error: r.error } : {}),
     })),
-    priceSources: { litPriceUSD, lighterNetUsdcFromDune: lighterNetUsdc },
+    priceSources: { litPriceUSD },
     fetchedAt: new Date(),
   };
 
