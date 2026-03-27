@@ -66,6 +66,8 @@ const STRATEGY_BUCKET_ACCOUNTS: Record<string, string[]> = {
     "PRISM Monarq Sentora PYUSD Vault ETHEREUM",
     "Open_Eden_August_Monarq_1 ETHEREUM",
     "PRISM Monarq Operations (Centrifuge) JAAA Position",
+    "PRISM Monarq Operations (Neutrl) ETHEREUM",
+    "PRISM Monarq Steakhouse AUSD ETHEREUM",
   ],
   "Prism Overcollaterized Lending": [
     "Maple Secured Inst Lending pool ETHEREUM",
@@ -1212,46 +1214,40 @@ async function main() {
   const fundingRatePayouts = adjustmentsResult.data ? computeFundingRatePayouts(adjustmentsResult.data) : { totalFundingUSD: 0, byAsset: [] };
   const yieldVolatility = aumResult.data?.timeSeries ? computeYieldVolatility(aumResult.data.timeSeries) : null;
 
-  // Build DeFi protocol concentration
-  const defiProtocolConcentration: { protocol: string; counterparty?: string; suppliedUSD: number; concentrationPct: number }[] = (() => {
-    if (reserve?.strategies) {
-      const defiKeys = ["deFiYieldStrategies", "overcollateralizedLending"];
-      let totalDefiUSD = 0;
-      for (const key of defiKeys) {
-        const s = (reserve.strategies as any)[key];
-        if (s && s.aum > 0) totalDefiUSD += s.aum;
-      }
-      const stratNames: Record<string, string> = {
-        deFiYieldStrategies: "DeFi Yield (Centrifuge/Sentora/Monarq)",
-        overcollateralizedLending: "Overcollateralized Lending (Maple)",
-      };
-      const result = defiKeys
-        .map((key) => {
-          const s = (reserve.strategies as any)[key];
-          if (!s || s.aum <= 0) return null;
-          return {
-            protocol: stratNames[key] ?? key,
-            counterparty: s.counterparty ?? "",
-            suppliedUSD: s.aum,
-            concentrationPct: totalDefiUSD > 0 ? (s.aum / totalDefiUSD) * 100 : 0,
-          };
-        })
-        .filter((x): x is NonNullable<typeof x> => x !== null);
-      if (result.length > 0) return result.sort((a, b) => b.concentrationPct - a.concentrationPct);
-    }
+  // Build DeFi protocol concentration — always use per-wallet data for consistent protocol names
+  // (aggregated strategy-level data is already captured in the `strategies` array)
+  const PROTOCOL_NAME_MAP: Record<string, string> = {
+    "Maple Secured Inst Lending pool ETHEREUM": "Maple (Overcollateralized Lending)",
+    "PRISM Monarq Sentora PYUSD Vault ETHEREUM": "Sentora PYUSD Vault (DeFi Yield)",
+    "Open_Eden_August_Monarq_1 ETHEREUM": "August/Monarq (DeFi Yield)",
+    "PRISM Monarq Operations (Centrifuge) ETHEREUM": "Centrifuge (DeFi Yield)",
+    "PRISM Monarq Operations (Neutrl) ETHEREUM": "Neutrl (DeFi Yield)",
+    "PRISM Monarq Steakhouse AUSD ETHEREUM": "Steakhouse AUSD (DeFi Yield)",
+  };
+
+  /** Derive a friendly display name from a raw Haruko wallet name.
+   *  Known wallets use the explicit map; unknown wallets get auto-cleaned. */
+  function toProtocolName(walletName: string): string {
+    if (PROTOCOL_NAME_MAP[walletName]) return PROTOCOL_NAME_MAP[walletName];
+    // Auto-clean: strip chain suffix, common prefixes, underscores
+    let name = walletName
+      .replace(/\s+ETHEREUM$/i, "")
+      .replace(/^PRISM\s+Monarq\s+(Operations\s*\(?)?/i, "")
+      .replace(/^Open_Eden_/i, "")
+      .replace(/_/g, " ")
+      .replace(/\)+$/, "")
+      .trim();
+    return name || walletName;
+  }
+
+  const defiProtocolConcentration: { protocol: string; suppliedUSD: number; concentrationPct: number }[] = (() => {
     const wallets = defiBalancesResult.data ?? [];
     if (wallets.length === 0) return [];
-    const protocolNameMap: Record<string, string> = {
-      "Maple Secured Inst Lending pool ETHEREUM": "Maple (Overcollateralized Lending)",
-      "PRISM Monarq Sentora PYUSD Vault ETHEREUM": "Sentora PYUSD Vault (DeFi Yield)",
-      "Open_Eden_August_Monarq_1 ETHEREUM": "August/Monarq (DeFi Yield)",
-      "PRISM Monarq Operations (Centrifuge) ETHEREUM": "Centrifuge (DeFi Yield)",
-    };
     const totalDefiUSD = wallets.reduce((sum: number, w: DefiWalletBalance) => sum + w.totalEquityUSD, 0);
     return wallets
       .filter((w: DefiWalletBalance) => w.totalEquityUSD > 0)
       .map((w: DefiWalletBalance) => ({
-        protocol: protocolNameMap[w.walletName] ?? w.walletName,
+        protocol: toProtocolName(w.walletName),
         suppliedUSD: w.totalEquityUSD,
         concentrationPct: totalDefiUSD > 0 ? (w.totalEquityUSD / totalDefiUSD) * 100 : 0,
       }))
@@ -1293,9 +1289,16 @@ async function main() {
     }
   }
   if (strategies.length === 0 && strategyPerformance.length > 0) {
+    // Map Haruko group names to canonical strategy names (matching PRISM API naming)
+    const groupToCanonical: Record<string, string> = {
+      "Prism Cash & Carry": "Cash & Carry",
+      "Prism Monarq Operations": "Tokenized US Treasuries",
+      "Prism DEFI": "DeFi Yield",
+      "Prism Overcollateralized Lending": "Overcollateralized Lending",
+    };
     for (const sp of strategyPerformance) {
       strategies.push({
-        strategy: sp.groupName,
+        strategy: groupToCanonical[sp.groupName] ?? sp.groupName,
         strategyKey: sp.groupName,
         aumUSD: sp.totalEquityUsd,
         allocationPct: totalAUM > 0 ? (sp.totalEquityUsd / totalAUM) * 100 : 0,
