@@ -22,15 +22,6 @@ const ETHPLORER_KEY = process.env.ETHPLORER_API_KEY || "freekey";
 const HARUKO_BASE_URL = "https://sgp10.haruko.io/cefi";
 const HARUKO_BEARER_TOKEN = process.env.HARUKO_BEARER_TOKEN!;
 
-const DUNE_API_KEY = process.env.DUNE_API_KEY!;
-const DUNE_BASE = "https://api.dune.com/api/v1";
-
-// Saved Dune query IDs (created once, executed each run)
-const DUNE_QUERY_LIT_PRICE = 6914770; // LIT (Lighter) token price from prices.latest
-// Lighter LP position is tracked via Haruko venue "Prism Lighter" (more accurate than Dune flow)
-
-// LIT staking: separate wallet not tracked by Ethplorer wallet list
-const LIT_STAKING_QUANTITY = 1094.0;
 
 // On-chain wallets grouped by strategy.
 // harukoVenueName: if set, Haruko /api/balance is used for this wallet instead of Ethplorer
@@ -51,6 +42,8 @@ const ONCHAIN_WALLETS: {
   { strategy: "DeFi",  deployment: "Steakhouse AUSD",address: "0x72ac7351fa9c064b89fb8344cc920553300af6b4", harukoVenueName: "PRISM Monarq Steakhouse AUSD Position" },
   { strategy: "Overcollateralized Lending", deployment: "Maple",                address: "0x9f78d300b9b8804107930a40b09f73e7b0f85dcc" },
   { strategy: "Cash & Carry",               deployment: "Lighter",              address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57", harukoVenueName: "Prism Lighter" },
+  // LIT staking: Haruko STATIC venue 489 tracks both quantity and live OKX price — no hardcoding needed
+  { strategy: "Cash & Carry",               deployment: "LIT Staking Rewards",  address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57", harukoVenueName: "Prism Lighter LIT Staking Rewards" },
 ];
 
 // ═══════════════════════════════════════════════════════════════════
@@ -82,34 +75,6 @@ async function fxFetch(path: string): Promise<any> {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// DUNE API — execute saved query and wait for result
-// ═══════════════════════════════════════════════════════════════════
-
-async function duneExecuteAndFetch(queryId: number): Promise<any[]> {
-  // Trigger execution
-  const execRes = await fetch(`${DUNE_BASE}/query/${queryId}/execute`, {
-    method: "POST",
-    headers: { "X-Dune-API-Key": DUNE_API_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify({}),
-  });
-  if (!execRes.ok) throw new Error(`Dune execute ${queryId}: ${execRes.status}`);
-  const { execution_id } = await execRes.json();
-
-  // Poll for completion
-  for (let attempt = 0; attempt < 30; attempt++) {
-    await new Promise((r) => setTimeout(r, 2000));
-    const statusRes = await fetch(`${DUNE_BASE}/execution/${execution_id}/results`, {
-      headers: { "X-Dune-API-Key": DUNE_API_KEY },
-    });
-    if (!statusRes.ok) continue;
-    const body = await statusRes.json();
-    if (body.state === "QUERY_STATE_COMPLETED") return body.result?.rows ?? [];
-    if (body.state === "QUERY_STATE_FAILED") throw new Error(`Dune query ${queryId} failed: ${body.error}`);
-  }
-  throw new Error(`Dune query ${queryId} timed out`);
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // HARUKO API — authoritative source for DeFi wallet valuations
 // ═══════════════════════════════════════════════════════════════════
 
@@ -125,7 +90,8 @@ async function harukoFetch(path: string, params?: Record<string, string>): Promi
 }
 
 /** Fetch USD balances for wallets that have a harukoVenueName.
- *  Returns map: lowercase_address → { totalUSD, tokens } */
+ *  Returns map: harukoVenueName → { totalUSD, tokens }
+ *  Keyed by venue name (not address) so multiple venues on the same address work correctly. */
 async function fetchHarukoWalletValues(
   wallets: { address: string; harukoVenueName: string }[]
 ): Promise<Map<string, { totalUSD: number; tokens: TokenBalance[] }>> {
@@ -169,7 +135,7 @@ async function fetchHarukoWalletValues(
             priceSource: "haruko" as const,
           }));
         const totalUSD = tokens.reduce((s, t) => s + t.usdValue, 0);
-        result.set(address.toLowerCase(), { totalUSD, tokens });
+        result.set(harukoVenueName, { totalUSD, tokens });
       } catch (e: any) {
         console.warn(`[Haruko/balance/${harukoVenueName}] ${e.message}`);
       }
@@ -335,15 +301,7 @@ async function main() {
 
   const provider = new ethers.JsonRpcProvider(process.env.ETH_RPC_URL!);
 
-  // ── 1. Fetch Dune LIT price ────────────────────────────────────────
-  // (Lighter LP position is now fetched directly from Haruko venue 472)
-  console.log("[Dune] Fetching LIT price...");
-  const litRows = await duneExecuteAndFetch(DUNE_QUERY_LIT_PRICE)
-    .catch((e) => { console.warn(`[Dune/LIT] ${e.message}`); return []; });
-  const litPriceUSD: number = litRows[0]?.price ?? 0;
-  console.log(`  LIT price: $${litPriceUSD.toFixed(4)}`);
-
-  // ── 2. FalconX CEX balances ────────────────────────────────────────
+  // ── 1. FalconX CEX balances ────────────────────────────────────────
   let cexPositions: any[] = [];
   let cexTotalNAV = 0;
 
@@ -434,35 +392,26 @@ async function main() {
 
   for (const w of ONCHAIN_WALLETS) {
     // Use Haruko data for DeFi wallets; Ethplorer for everything else
-    const harukoData = harukoValues.get(w.address.toLowerCase());
+    // Key is harukoVenueName (not address) so multiple venues on the same wallet address resolve correctly
+    const harukoData = w.harukoVenueName ? harukoValues.get(w.harukoVenueName) : undefined;
+    const shortAddr = w.address ? `${w.address.slice(0, 6)}…${w.address.slice(-4)}` : "";
     if (harukoData) {
       onchainResults.push({ strategy: w.strategy, deployment: w.deployment, address: w.address, totalUSD: harukoData.totalUSD, tokens: harukoData.tokens });
-      console.log(`  ${w.deployment}: $${harukoData.totalUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })} (Haruko)`);
+      console.log(`  ${w.deployment} [${shortAddr}]: $${harukoData.totalUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })} (Haruko)`);
       continue;
     }
     try {
       const { totalUSD, tokens } = await fetchWalletBalances(w.address, provider);
       onchainResults.push({ strategy: w.strategy, deployment: w.deployment, address: w.address, totalUSD, tokens });
-      console.log(`  ${w.deployment}: $${totalUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
+      console.log(`  ${w.deployment} [${shortAddr}]: $${totalUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
       await new Promise((r) => setTimeout(r, 500)); // Ethplorer rate limit
     } catch (e: any) {
-      console.error(`  ${w.deployment}: ERROR — ${e.message}`);
+      console.error(`  ${w.deployment} [${shortAddr}]: ERROR — ${e.message}`);
       onchainResults.push({ strategy: w.strategy, deployment: w.deployment, address: w.address, totalUSD: 0, tokens: [], error: e.message });
     }
   }
 
-  // ── 5. LIT staking (separate wallet, price from Dune) ─────────────
-  const litStakingUSD = LIT_STAKING_QUANTITY * litPriceUSD;
-  onchainResults.push({
-    strategy: "Cash & Carry",
-    deployment: "LIT Staking Rewards",
-    address: "",
-    totalUSD: litStakingUSD,
-    tokens: [{ asset: "LIT", contractAddress: "0xb59490ab09a0f526cc7305822ac65f2ab12f9723", balance: LIT_STAKING_QUANTITY, usdValue: litStakingUSD, priceSource: "dune" }],
-  });
-  console.log(`  LIT Staking Rewards: $${litStakingUSD.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
-
-  // ── 6. Build strategy breakdown ────────────────────────────────────
+  // ── 5. Build strategy breakdown ────────────────────────────────────
   const strategyMap: Record<string, { totalUSD: number; deployments: any[] }> = {};
 
   for (const r of onchainResults) {
@@ -473,7 +422,15 @@ async function main() {
 
   if (!strategyMap["Cash & Carry"]) strategyMap["Cash & Carry"] = { totalUSD: 0, deployments: [] };
   strategyMap["Cash & Carry"].totalUSD += cexTotalNAV;
-  strategyMap["Cash & Carry"].deployments.push({ deployment: "FalconX CEX", address: "", totalUSD: cexTotalNAV, tokens: [] });
+  // Push one row per CEX venue so we can show the venue name as the "address" column
+  for (const pos of cexPositions) {
+    strategyMap["Cash & Carry"].deployments.push({
+      deployment: pos.venue,
+      address: pos.venue,   // venue name used as identifier in address column
+      totalUSD: pos.netBalanceUSD,
+      tokens: [],
+    });
+  }
 
   const strategies = Object.entries(strategyMap)
     .map(([strategy, d]) => ({ strategy, totalUSD: d.totalUSD, deployments: d.deployments.sort((a, b) => b.totalUSD - a.totalUSD) }))
@@ -486,6 +443,32 @@ async function main() {
   console.log(`  CEX total:        $${cexTotalNAV.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
   console.log(`  Group equity:     $${groupEquity.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
   console.log(`  Net delta (deriv):$${totalNetDelta.toLocaleString("en-US", { minimumFractionDigits: 2 })}`);
+
+  // ── Print formatted strategy table ────────────────────────────────
+  const fmtUSD = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const shortEOA = (a: string) => a.startsWith("0x") ? `${a.slice(0, 6)}…${a.slice(-4)}` : a;
+  const col1 = 26, col2 = 18, col3 = 16;
+  const W = col1 + col2 + col3 + 4;
+  console.log("\n" + "═".repeat(W));
+  console.log("  STRATEGY DRILLDOWN");
+  console.log("═".repeat(W));
+  console.log(
+    `  ${"Deployment".padEnd(col1)}${"Address / Venue".padEnd(col2)}${"Value (USD)".padStart(col3)}`
+  );
+  console.log("  " + "─".repeat(col1 + col2 + col3));
+  for (const strat of strategies) {
+    console.log(`\n  ▸ ${strat.strategy.toUpperCase()} — ${fmtUSD(strat.totalUSD)}`);
+    for (const d of strat.deployments) {
+      if (Math.abs(d.totalUSD) < 0.01) continue; // skip zero rows
+      const addrCol = d.address && d.address !== d.deployment
+        ? shortEOA(d.address)
+        : "";
+      console.log(
+        `    ${d.deployment.padEnd(col1 - 2)}${addrCol.padEnd(col2)}${fmtUSD(d.totalUSD).padStart(col3)}`
+      );
+    }
+  }
+  console.log("\n" + "═".repeat(W));
 
   // ── 7. Build + persist document ────────────────────────────────────
   const now = new Date();
@@ -507,7 +490,7 @@ async function main() {
       strategy: r.strategy, deployment: r.deployment, address: r.address,
       totalUSD: r.totalUSD, tokens: r.tokens, ...(r.error ? { error: r.error } : {}),
     })),
-    priceSources: { litPriceUSD },
+    priceSources: {},
     fetchedAt: new Date(),
   };
 

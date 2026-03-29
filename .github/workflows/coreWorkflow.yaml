@@ -35,3 +35,14 @@ jobs:
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
           ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
         run: npm run fetch-prism-risk
+
+      - name: Fetch PRISM portfolio balance details
+        env:
+          HARUKO_BEARER_TOKEN: ${{ secrets.HARUKO_BEARER_TOKEN }}
+          FALCONX_API_KEY: ${{ secrets.FALCONX_API_KEY }}
+          FALCONX_API_SECRET: ${{ secrets.FALCONX_API_SECRET }}
+          FALCONX_PASSPHRASE: ${{ secrets.FALCONX_PASSPHRASE }}
+          ETHPLORER_API_KEY: ${{ secrets.ETHPLORER_API_KEY }}
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+        run: npm run fetch-portfolio-balance
