@@ -123,6 +123,24 @@ interface CapitalAllocationEntry {
   percentage: number;
 }
 
+interface GrossLeverageStrategyEntry {
+  strategy: string;
+  spotUSD: number;
+  futuresAbsNotionalUSD: number;
+  grossExposureUSD: number;
+  strategyEquityUSD: number;
+  grossLeverage: number;
+}
+
+interface GrossLeverageDeploymentEntry {
+  venue: string;
+  strategy: string;
+  spotEquityUSD: number;
+  futuresAbsNotionalUSD: number;
+  grossExposureUSD: number;
+  pctOfAUM: number;
+}
+
 interface CounterpartyExposureEntry {
   venue: string;
   totalExposureUSD: number;
@@ -644,7 +662,8 @@ async function fetchOnChainData(): Promise<OnChainData> {
 function computeFromSummary(
   totalAUM: number,
   strategySummaries: Record<string, any>,
-  primarySummaryData: any | null
+  primarySummaryData: any | null,
+  positionsData: any | null = null
 ) {
   // Use the first available strategy summary for detailed breakdowns (balances, venue data, etc.)
   // Merge balances and venue data from ALL strategy summaries
@@ -675,12 +694,75 @@ function computeFromSummary(
   });
 
   // B.1 — Vault Gross Leverage
+  // Gross leverage = (spot USD + |futures notional USD|) / AUM
+  // Using absolute values of both legs so delta-neutral C&C books count correctly
   const assetProducts: any[] = mergedAssetProducts;
-  const totalExposure = assetProducts.reduce(
-    (sum: number, item: any) => sum + (item.totalExposureUSD ?? 0),
+  const spotUSD = mergedBalances.reduce(
+    (sum: number, b: any) => sum + (b.equity ?? 0) * (b.refPx ?? 1),
     0
   );
-  const vaultGrossLeverage = totalAUM > 0 ? totalExposure / totalAUM : 0;
+  const futuresAbsNotionalUSD = (positionsData?.futuresPositions ?? []).reduce(
+    (sum: number, p: any) => sum + Math.abs(p.sizeUsd ?? 0),
+    0
+  );
+  const totalGrossExposure = spotUSD + futuresAbsNotionalUSD;
+  const vaultGrossLeverage = totalAUM > 0 ? totalGrossExposure / totalAUM : 0;
+
+  // B.1 breakdown — by strategy bucket
+  const grossLeverageByStrategy: GrossLeverageStrategyEntry[] = STRATEGY_GROUPS.map((g) => {
+    const data = strategySummaries[g.groupId];
+    const summary = data?.summary ?? data;
+    const groupBalances: any[] = summary?.balances ?? [];
+    const strategyEquityUSD: number = summary?.totalEquityUSD ?? 0;
+    const gSpotUSD = groupBalances.reduce(
+      (sum: number, b: any) => sum + (b.equity ?? 0) * (b.refPx ?? 1),
+      0
+    );
+    return { strategy: g.name, spotUSD: gSpotUSD, futuresAbsNotionalUSD: 0, grossExposureUSD: gSpotUSD, strategyEquityUSD, grossLeverage: strategyEquityUSD > 0 ? gSpotUSD / strategyEquityUSD : 0 };
+  });
+  // All futures positions belong to C&C
+  const ccStratEntry = grossLeverageByStrategy.find((e) => e.strategy === "Prism Cash & Carry");
+  if (ccStratEntry) {
+    ccStratEntry.futuresAbsNotionalUSD = futuresAbsNotionalUSD;
+    ccStratEntry.grossExposureUSD += futuresAbsNotionalUSD;
+    ccStratEntry.grossLeverage = ccStratEntry.strategyEquityUSD > 0 ? ccStratEntry.grossExposureUSD / ccStratEntry.strategyEquityUSD : 0;
+  }
+
+  // B.1 breakdown — by deployment (venue)
+  const venueToStrategy = new Map<string, string>();
+  for (const g of STRATEGY_GROUPS) {
+    const data = strategySummaries[g.groupId];
+    const summary = data?.summary ?? data;
+    for (const item of summary?.summaryByVenueByAsset ?? []) {
+      if (item.venue) venueToStrategy.set(item.venue, g.name);
+    }
+  }
+  const venueSpotMap = new Map<string, number>();
+  for (const item of mergedVenueData) {
+    const venue: string = item.venue ?? "unknown";
+    venueSpotMap.set(venue, (venueSpotMap.get(venue) ?? 0) + (item.totalEquityUSD ?? 0));
+  }
+  const venueFuturesMap = new Map<string, number>();
+  for (const p of positionsData?.futuresPositions ?? []) {
+    const venue: string = p.venue ?? "unknown";
+    venueFuturesMap.set(venue, (venueFuturesMap.get(venue) ?? 0) + Math.abs(p.sizeUsd ?? 0));
+  }
+  const allVenues = new Set([...venueSpotMap.keys(), ...venueFuturesMap.keys()]);
+  const grossLeverageByDeployment: GrossLeverageDeploymentEntry[] = Array.from(allVenues)
+    .map((venue) => {
+      const spotEquityUSD = venueSpotMap.get(venue) ?? 0;
+      const futAbsNotional = venueFuturesMap.get(venue) ?? 0;
+      const grossExposureUSD = spotEquityUSD + futAbsNotional;
+      return {
+        venue,
+        strategy: venueToStrategy.get(venue) ?? "Unknown",
+        spotEquityUSD,
+        futuresAbsNotionalUSD: futAbsNotional,
+        grossExposureUSD,
+        pctOfAUM: totalAUM > 0 ? grossExposureUSD / totalAUM : 0,
+      };
+    })
+    .sort((a, b) => b.grossExposureUSD - a.grossExposureUSD);
 
   // B.6 — Portfolio Liquidity Profile
   let liquidAssetsUSD = 0;
@@ -798,6 +880,8 @@ function computeFromSummary(
     totalAUM,
     capitalAllocation,
     vaultGrossLeverage,
+    grossLeverageByStrategy,
+    grossLeverageByDeployment,
     portfolioLiquidity,
     counterpartyExposure,
     stablecoinHoldings,
@@ -1193,7 +1277,7 @@ async function main() {
   const totalAUM = reserve?.aum ?? aumResult.data?.totalAUM ?? 0;
   const strategySummaries = strategySummariesResult.data ?? {};
   const summaryMetrics = totalAUM > 0
-    ? computeFromSummary(totalAUM, strategySummaries, null)
+    ? computeFromSummary(totalAUM, strategySummaries, null, positionsResult.data)
     : null;
   const onChain = onChainResult.data;
   const collateralizationRatio = reserve?.ratio
@@ -1343,6 +1427,8 @@ async function main() {
 
     // B. Key Risk Indicators (scalars)
     vaultGrossLeverage: summaryMetrics?.vaultGrossLeverage ?? null,
+    grossLeverageByStrategy: summaryMetrics?.grossLeverageByStrategy ?? [],
+    grossLeverageByDeployment: summaryMetrics?.grossLeverageByDeployment ?? [],
     averageBasisAnnualizedPct: averageBasis.weightedAnnualizedBasisPct,
     averageLTVPct: averageLTV.weightedLTV * 100,
     activeLoanCount: averageLTV.loans.length,
@@ -1430,6 +1516,19 @@ async function main() {
     // B. Key Risk Indicators
     console.log("\n  B. KEY RISK INDICATORS");
     console.log(`  B.1  Vault Gross Leverage:      ${fmt(doc.vaultGrossLeverage)}x`);
+    if (doc.grossLeverageByStrategy?.length > 0) {
+      console.log(`        By Strategy:`);
+      for (const s of doc.grossLeverageByStrategy) {
+        console.log(`          • ${s.strategy}: spot=${fmtUSD(s.spotUSD)} futures=${fmtUSD(s.futuresAbsNotionalUSD)} gross=${fmtUSD(s.grossExposureUSD)} equity=${fmtUSD(s.strategyEquityUSD)} → ${fmt(s.grossLeverage)}x`);
+      }
+    }
+    if (doc.grossLeverageByDeployment?.length > 0) {
+      console.log(`        By Deployment:`);
+      for (const d of doc.grossLeverageByDeployment) {
+        const lev = (d.pctOfAUM * 100).toFixed(1);
+        console.log(`          • ${d.venue} [${d.strategy}]: spot=${fmtUSD(d.spotEquityUSD)} futures=${fmtUSD(d.futuresAbsNotionalUSD)} gross=${fmtUSD(d.grossExposureUSD)} (${lev}% AUM)`);
+      }
+    }
 
     if (cexMarginTypes.length > 0) {
       console.log(`  B.2  CEX Margin Types:          ${cexMarginTypes.length} positions (${cexMarginTypes.filter((m) => m.isCross).length} cross-margin)`);

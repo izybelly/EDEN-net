@@ -428,7 +428,13 @@ async function main() {
       deployment: pos.venue,
       address: pos.venue,   // venue name used as identifier in address column
       totalUSD: pos.netBalanceUSD,
-      tokens: [],
+      tokens: pos.positions.map((p: any) => ({
+        asset: p.asset,
+        contractAddress: "",
+        balance: p.quantity,
+        usdValue: p.netBalanceUSD,
+        priceSource: "falconx" as const,
+      })),
     });
   }
 
@@ -466,6 +472,12 @@ async function main() {
       console.log(
         `    ${d.deployment.padEnd(col1 - 2)}${addrCol.padEnd(col2)}${fmtUSD(d.totalUSD).padStart(col3)}`
       );
+      // Token breakdown
+      for (const tok of (d.tokens ?? []).filter((t: any) => Math.abs(t.usdValue) >= 0.01)) {
+        const qty = tok.balance.toLocaleString("en-US", { maximumFractionDigits: 4 });
+        const label = `      ${tok.asset} ${qty}`.padEnd(col1 + col2 - 2);
+        console.log(`${label}${fmtUSD(tok.usdValue).padStart(col3)}`);
+      }
     }
   }
   console.log("\n" + "═".repeat(W));
