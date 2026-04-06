@@ -35,3 +35,9 @@ jobs:
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
           ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
         run: npm run fetch-prism-risk
+
+      - name: Fetch PRISM redemption requests
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+        run: npm run fetch-prism-redemptions
