@@ -10,7 +10,7 @@ const DUNE_QUERY_ID = 6953622; // PRISMExpress - Daily Redemption Requests (4pm 
 
 const MONGODB_URI = process.env.MONGODB_CONNECTION_STRING!;
 const MONGODB_DB = "prod";
-const MONGODB_COLLECTION = "prism_risk_metrics";
+const MONGODB_COLLECTION = "prism_redemption_metrics";
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -99,14 +99,10 @@ async function main() {
   const doc = {
     snapshotId,
     dateKey: targetDate,
-    type: "redemption_requests",
-
-    // Core redemption fields
     settlementDate: targetDate,
     numRequests: row ? Number(row.num_requests) : 0,
     totalRedemptionUSDO: row ? Number(row.total_redemption_usdo) : 0,
     txHashes: row?.tx_hashes ?? [],
-
     fetchedAt: new Date(),
   };
 
@@ -116,18 +112,18 @@ async function main() {
   try {
     const col = client.db(MONGODB_DB).collection(MONGODB_COLLECTION);
 
-    // Upsert: one redemption_requests doc per dateKey (idempotent re-runs)
+    // Upsert: one doc per dateKey (idempotent re-runs)
     const result = await col.updateOne(
-      { dateKey: targetDate, type: "redemption_requests" },
+      { dateKey: targetDate },
       { $set: doc },
       { upsert: true }
     );
 
-    await col.createIndex({ dateKey: 1, type: 1 });
+    await col.createIndex({ dateKey: 1 }, { unique: true });
 
     const action = result.upsertedCount > 0 ? "Inserted" : "Updated";
     console.log(
-      `[${MONGODB_COLLECTION}] ${action} redemption_requests for ${targetDate}: ` +
+      `[${MONGODB_COLLECTION}] ${action} for ${targetDate}: ` +
         `numRequests=${doc.numRequests}, totalRedemptionUSDO=${doc.totalRedemptionUSDO}`
     );
   } finally {
