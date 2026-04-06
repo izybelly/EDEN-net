@@ -41,6 +41,8 @@ const ONCHAIN_WALLETS: {
   { strategy: "DeFi",  deployment: "SNUSD",          address: "0xd29fda60ab08b540d38300649af706ada9da1331", harukoVenueName: "PRISM Monarq Operations (Neutrl) Position" },
   { strategy: "DeFi",  deployment: "Steakhouse AUSD",address: "0x72ac7351fa9c064b89fb8344cc920553300af6b4", harukoVenueName: "PRISM Monarq Steakhouse AUSD Position" },
   { strategy: "Overcollateralized Lending", deployment: "Maple",                address: "0x9f78d300b9b8804107930a40b09f73e7b0f85dcc" },
+  { strategy: "Overcollateralized Lending", deployment: "Falconx Pareto Position", address: "0x8a602f71cb72663fb0e4019b3b2d59d2944a4981", harukoVenueName: "Falconx Pareto Position" },
+  { strategy: "Overcollateralized Lending", deployment: "FalconX Pareto ETHEREUM",  address: "0x8a602f71cb72663fb0e4019b3b2d59d2944a4981", harukoVenueName: "FalconX Pareto ETHEREUM" },
   { strategy: "Cash & Carry",               deployment: "Lighter",              address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57", harukoVenueName: "Prism Lighter" },
   // LIT staking: Haruko STATIC venue 489 tracks both quantity and live OKX price — no hardcoding needed
   { strategy: "Cash & Carry",               deployment: "LIT Staking Rewards",  address: "0xd225ea0888161c23f90cfd0fdc83bfa55e070f57", harukoVenueName: "Prism Lighter LIT Staking Rewards" },

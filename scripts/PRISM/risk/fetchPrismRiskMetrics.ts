@@ -57,6 +57,7 @@ const STRATEGY_BUCKET_ACCOUNTS: Record<string, string[]> = {
     "Prism Lighter Staked LIT",
   ],
   "Prism Monarq Operations": [
+    "Prism Yield wallet",
     "BitGo PRISM Funding Wallet",
     "BitGo Monarq Ops Wallet",
     "BitGo Tokenized US Treasuries",
@@ -66,11 +67,15 @@ const STRATEGY_BUCKET_ACCOUNTS: Record<string, string[]> = {
     "PRISM Monarq Sentora PYUSD Vault ETHEREUM",
     "Open_Eden_August_Monarq_1 ETHEREUM",
     "PRISM Monarq Operations (Centrifuge) JAAA Position",
+    "PRISM Monarq Operations (Neutrl) Position",
     "PRISM Monarq Operations (Neutrl) ETHEREUM",
+    "PRISM Monarq Steakhouse AUSD Position",
     "PRISM Monarq Steakhouse AUSD ETHEREUM",
   ],
   "Prism Overcollaterized Lending": [
     "Maple Secured Inst Lending pool ETHEREUM",
+    "Falconx Pareto Position",
+    "FalconX Pareto ETHEREUM",
   ],
 };
 
