@@ -23,16 +23,41 @@ function todayDateKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-// ─── Dune polling ────────────────────────────────────────────────
+/**
+ * Computes the settlement window timestamps for the current day's batch.
+ *
+ * 4pm SGT = 08:00 UTC
+ *   window opens:  yesterday at 08:01 UTC
+ *   window closes: today     at 08:00 UTC
+ *
+ * Returns strings in "YYYY-MM-DD HH:MM:SS" format expected by Dune date params.
+ */
+function settlementWindow(): { startTime: string; endTime: string } {
+  const now = new Date();
+
+  // today 08:00 UTC
+  const end = new Date(now);
+  end.setUTCHours(8, 0, 0, 0);
+
+  // yesterday 08:01 UTC
+  const start = new Date(end);
+  start.setUTCDate(start.getUTCDate() - 1);
+  start.setUTCMinutes(1);
+
+  const fmt = (d: Date) => d.toISOString().replace("T", " ").slice(0, 19);
+
+  return { startTime: fmt(start), endTime: fmt(end) };
+}
+
+// ─── Dune ────────────────────────────────────────────────────────
 
 interface DuneRow {
-  settlement_date: string; // "2026-04-05"
   num_requests: number;
-  total_redemption_usdo: number;
+  total_redemption_prism: number;
   tx_hashes: string[];
 }
 
-async function executeDuneQuery(): Promise<string> {
+async function executeDuneQuery(startTime: string, endTime: string): Promise<string> {
   const res = await fetch(
     `https://api.dune.com/api/v1/query/${DUNE_QUERY_ID}/execute`,
     {
@@ -41,7 +66,13 @@ async function executeDuneQuery(): Promise<string> {
         "X-Dune-API-Key": DUNE_API_KEY,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ performance: "medium" }),
+      body: JSON.stringify({
+        query_parameters: {
+          start_time: startTime,
+          end_time: endTime,
+        },
+        performance: "medium",
+      }),
     }
   );
   const json = (await res.json()) as { execution_id?: string };
@@ -75,33 +106,34 @@ async function pollDuneResults(executionId: string): Promise<DuneRow[]> {
 // ─── Main ────────────────────────────────────────────────────────
 
 async function main() {
-  const targetDate = todayDateKey(); // e.g. "2026-04-06"
-  console.log(`[prism-redemptions] Fetching redemption requests for settlement_date=${targetDate}`);
+  const dateKey = todayDateKey();
+  const { startTime, endTime } = settlementWindow();
 
-  const executionId = await executeDuneQuery();
+  console.log(`[prism-redemptions] Settlement window: ${startTime} → ${endTime} UTC`);
+  console.log(`[prism-redemptions] dateKey=${dateKey}`);
+
+  const executionId = await executeDuneQuery(startTime, endTime);
   console.log(`[dune] execution_id=${executionId}`);
 
   const rows = await pollDuneResults(executionId);
-  console.log(`[dune] Query returned ${rows.length} rows`);
+  console.log(`[dune] Query returned ${rows.length} row(s)`);
 
-  // Filter to yesterday's settlement date
-  const row = rows.find((r) => {
-    // Dune may return dates as "2026-04-05 00:00:00.000 UTC" or "2026-04-05"
-    return r.settlement_date.slice(0, 10) === targetDate;
-  });
+  // Query returns a single aggregate row; if no events it returns an empty result
+  const row = rows[0] ?? null;
 
-  if (!row) {
-    console.warn(`[prism-redemptions] No redemption data found for ${targetDate} — inserting zero-row.`);
+  if (!row || row.num_requests === 0) {
+    console.warn(`[prism-redemptions] No redemption events in window — storing zero-row.`);
   }
 
   const snapshotId = new Date().toISOString();
 
   const doc = {
     snapshotId,
-    dateKey: targetDate,
-    settlementDate: targetDate,
+    dateKey,
+    windowStart: startTime,
+    windowEnd: endTime,
     numRequests: row ? Number(row.num_requests) : 0,
-    totalRedemptionUSDO: row ? Number(row.total_redemption_usdo) : 0,
+    totalRedemptionPRISM: row ? Number(row.total_redemption_prism) : 0,
     txHashes: row?.tx_hashes ?? [],
     fetchedAt: new Date(),
   };
@@ -114,7 +146,7 @@ async function main() {
 
     // Upsert: one doc per dateKey (idempotent re-runs)
     const result = await col.updateOne(
-      { dateKey: targetDate },
+      { dateKey },
       { $set: doc },
       { upsert: true }
     );
@@ -123,8 +155,8 @@ async function main() {
 
     const action = result.upsertedCount > 0 ? "Inserted" : "Updated";
     console.log(
-      `[${MONGODB_COLLECTION}] ${action} for ${targetDate}: ` +
-        `numRequests=${doc.numRequests}, totalRedemptionUSDO=${doc.totalRedemptionUSDO}`
+      `[${MONGODB_COLLECTION}] ${action} for ${dateKey}: ` +
+        `numRequests=${doc.numRequests}, totalRedemptionPRISM=${doc.totalRedemptionPRISM}`
     );
   } finally {
     await client.close();
