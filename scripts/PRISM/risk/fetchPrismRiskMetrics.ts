@@ -453,7 +453,13 @@ interface DefiWalletBalance {
 }
 
 async function fetchDefiWalletBalances(venueAccounts: Record<string, VenueAccount>): Promise<DefiWalletBalance[]> {
-  const defiAccounts = Object.values(venueAccounts).filter((a) => a.venueType === "DeFi");
+  // Include all DeFi-typed accounts PLUS all lending group accounts regardless of venueType.
+  // "Falconx Pareto Position" is CeFi-typed in Haruko but holds lending receipts (AA_FALCONXUSDC)
+  // that must be included for correct Pareto lent amount tracking.
+  const lendingAccountNames = new Set(STRATEGY_BUCKET_ACCOUNTS["Prism Overcollaterized Lending"] ?? []);
+  const defiAccounts = Object.values(venueAccounts).filter(
+    (a) => a.venueType === "DeFi" || lendingAccountNames.has(a.name)
+  );
   if (defiAccounts.length === 0) return [];
 
   const results: DefiWalletBalance[] = [];
@@ -979,6 +985,7 @@ function computeAverageLTV(
   mapleLentAmountUSD: number | null;
   paretoLentAmountUSD: number | null;
 } {
+  // --- Part 1: Direct loan data from /api/loans (when Haruko returns it) ---
   const allLoans: any[] = data.loans ?? [];
   const now = Date.now();
 
@@ -999,24 +1006,48 @@ function computeAverageLTV(
     totalCollateralValue += collateralValue;
   }
 
-  // Derive per-protocol lent amounts from DeFi wallet balances (Haruko).
+  // --- Part 2: Sum per-protocol lent amounts from DeFi wallet balances ---
+  // Multiple wallet entries per protocol (e.g. "Falconx Pareto Position" + "FalconX Pareto ETHEREUM")
+  // share the same address and must all be summed — never use .find() which only picks first match.
   // PRISM is the lender on both Maple and Pareto — we are not the borrower.
   let mapleLentAmountUSD: number | null = null;
   let paretoLentAmountUSD: number | null = null;
 
   if (defiWalletBalances) {
-    const mapleWallet = defiWalletBalances.find(
-      (w) => w.walletName.toLowerCase().includes("maple")
-    );
-    if (mapleWallet) {
-      mapleLentAmountUSD = mapleWallet.totalEquityUSD;
-    }
+    const mapleTotal = defiWalletBalances
+      .filter((w) => w.walletName.toLowerCase().includes("maple"))
+      .reduce((sum, w) => sum + w.totalEquityUSD, 0);
+    if (mapleTotal > 0.01) mapleLentAmountUSD = mapleTotal;
 
-    const paretoWallet = defiWalletBalances.find(
-      (w) => w.walletName.toLowerCase().includes("pareto")
-    );
-    if (paretoWallet) {
-      paretoLentAmountUSD = paretoWallet.totalEquityUSD;
+    const paretoTotal = defiWalletBalances
+      .filter((w) => w.walletName.toLowerCase().includes("pareto"))
+      .reduce((sum, w) => sum + w.totalEquityUSD, 0);
+    if (paretoTotal > 0.01) paretoLentAmountUSD = paretoTotal;
+
+    // --- Part 3: Derive active lending positions when /api/loans returns empty ---
+    // Iterate all wallet positions in the lending group. Each protocol with an active
+    // balance is a lending position. Collateral is not exposed by Haruko so LTV stays 0
+    // until a direct Maple/Pareto API integration provides collateral values.
+    if (activeLoans.length === 0) {
+      const lendingPositions: { name: string; lentUSD: number }[] = [];
+      if (mapleLentAmountUSD !== null && mapleLentAmountUSD > 0.01) {
+        lendingPositions.push({ name: "Maple", lentUSD: mapleLentAmountUSD });
+      }
+      if (paretoLentAmountUSD !== null && paretoLentAmountUSD > 0.01) {
+        lendingPositions.push({ name: "Pareto", lentUSD: paretoLentAmountUSD });
+      }
+      for (const p of lendingPositions) {
+        // borrowValue = lent amount (PRISM's outstanding principal per protocol)
+        // collateralValue = 0 (unknown without direct protocol API — LTV cannot be computed)
+        // maturityTs = MAX (open-ended revolving pools; no fixed maturity from Haruko)
+        activeLoans.push({
+          borrowValue: p.lentUSD,
+          collateralValue: 0,
+          ltv: 0,
+          maturityTs: Number.MAX_SAFE_INTEGER,
+        });
+        totalBorrowValue += p.lentUSD;
+      }
     }
   }
 
