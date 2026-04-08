@@ -945,7 +945,7 @@ function computeAverageBasis(data: any): {
     } else {
       // For dated futures: annualize using days-to-expiry
       const daysToExpiry = (maturityMs - now) / (1000 * 60 * 60 * 24);
-      if (daysToExpiry <= 0) continue;
+      if (daysToExpiry <= 3) continue; // exclude near-expiry positions (< 3 days)
       annualizedBasis = basis * (365 / daysToExpiry) * 100;
     }
 
