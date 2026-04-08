@@ -976,11 +976,8 @@ function computeAverageLTV(
 ): {
   weightedLTV: number;
   loans: LoanEntry[];
-  overcollateralizedLending: {
-    protocol: string;
-    lentAmountUSD: number;
-    note: string;
-  } | null;
+  mapleLentAmountUSD: number | null;
+  paretoLentAmountUSD: number | null;
 } {
   const allLoans: any[] = data.loans ?? [];
   const now = Date.now();
@@ -1002,41 +999,39 @@ function computeAverageLTV(
     totalCollateralValue += collateralValue;
   }
 
-  // If Haruko /api/loans is empty, derive from overcollateralized lending data.
-  // PRISM lends via Maple Secured Inst Lending pool — we are the lender.
-  // The LTV here represents the borrower's LTV on Maple (how much they borrowed
-  // against their posted collateral). Maple Secured pools typically enforce ≤ ~70% LTV.
-  let overcollateralizedLending: {
-    protocol: string;
-    lentAmountUSD: number;
-    note: string;
-  } | null = null;
+  // Derive per-protocol lent amounts from DeFi wallet balances (Haruko).
+  // PRISM is the lender on both Maple and Pareto — we are not the borrower.
+  let mapleLentAmountUSD: number | null = null;
+  let paretoLentAmountUSD: number | null = null;
 
-  // Get the Maple position value from PRISM reserve API or DeFi wallet balances
-  let mapleLentAmount = 0;
-  if (reserve?.strategies?.overcollateralizedLending) {
-    mapleLentAmount = reserve.strategies.overcollateralizedLending.aum;
-  } else if (defiWalletBalances) {
+  if (defiWalletBalances) {
     const mapleWallet = defiWalletBalances.find(
       (w) => w.walletName.toLowerCase().includes("maple")
     );
     if (mapleWallet) {
-      mapleLentAmount = mapleWallet.totalEquityUSD;
+      mapleLentAmountUSD = mapleWallet.totalEquityUSD;
+    }
+
+    const paretoWallet = defiWalletBalances.find(
+      (w) => w.walletName.toLowerCase().includes("pareto")
+    );
+    if (paretoWallet) {
+      paretoLentAmountUSD = paretoWallet.totalEquityUSD;
     }
   }
 
-  if (mapleLentAmount > 0) {
-    overcollateralizedLending = {
-      protocol: "Maple Secured Inst Lending",
-      lentAmountUSD: mapleLentAmount,
-      note: "PRISM is the lender. Maple Secured pools enforce max ~70% borrower LTV with BTC/ETH collateral.",
-    };
+  // Fallback to reserve API combined total for Maple if DeFi balances unavailable.
+  // Note: reserve.strategies.overcollateralizedLending.aum is a combined total
+  // (Maple + Pareto), so Pareto cannot be split out from this path.
+  if (mapleLentAmountUSD === null && reserve?.strategies?.overcollateralizedLending) {
+    mapleLentAmountUSD = reserve.strategies.overcollateralizedLending.aum;
   }
 
   return {
     weightedLTV: totalCollateralValue > 0 ? totalBorrowValue / totalCollateralValue : 0,
     loans: activeLoans,
-    overcollateralizedLending,
+    mapleLentAmountUSD,
+    paretoLentAmountUSD,
   };
 }
 
@@ -1437,7 +1432,8 @@ async function main() {
     averageBasisAnnualizedPct: averageBasis.weightedAnnualizedBasisPct,
     averageLTVPct: averageLTV.weightedLTV * 100,
     activeLoanCount: averageLTV.loans.length,
-    mapleLentAmountUSD: averageLTV.overcollateralizedLending?.lentAmountUSD ?? null,
+    mapleLentAmountUSD: averageLTV.mapleLentAmountUSD,
+    paretoLentAmountUSD: averageLTV.paretoLentAmountUSD,
     defiLeverageLTV: defiLeverage?.averageLTV ?? null,
     liquidAssetsUSD: summaryMetrics?.portfolioLiquidity?.liquidAssetsUSD ?? null,
     illiquidAssetsUSD: summaryMetrics?.portfolioLiquidity?.illiquidAssetsUSD ?? null,
@@ -1550,10 +1546,15 @@ async function main() {
     }
 
     console.log(`  B.4  Average LTV (Lending):     ${fmtPct(doc.averageLTVPct)} (${doc.activeLoanCount} active loans)`);
-    if (doc.mapleLentAmountUSD) {
+    if (doc.mapleLentAmountUSD || doc.paretoLentAmountUSD) {
       console.log(`        Overcollateralized Lending:`);
-      console.log(`        • Maple Secured Inst Lending: ${fmtUSD(doc.mapleLentAmountUSD)} lent`);
-      console.log(`        • PRISM is the lender. Maple Secured pools enforce max ~70% borrower LTV.`);
+      if (doc.mapleLentAmountUSD) {
+        console.log(`        • Maple Secured Inst Lending: ${fmtUSD(doc.mapleLentAmountUSD)} lent`);
+      }
+      if (doc.paretoLentAmountUSD) {
+        console.log(`        • Pareto (FalconX): ${fmtUSD(doc.paretoLentAmountUSD)} lent`);
+      }
+      console.log(`        • PRISM is the lender on both. Overcollateralized with BTC/ETH collateral.`);
     }
 
     if (defiLeverage) {
