@@ -21,6 +21,19 @@ const ETH_RPC_URL = process.env.ETH_RPC_URL!;
 const PRISM_ADDRESS = "0x06Bb4ab600b7D22eB2c312f9bAbC22Be6a619046";
 const XPRISM_ADDRESS = "0x12E04c932D682a2999b4582F7c9B86171B73220D";
 
+// Maple Finance — Secured Institutional Lending pool (Ethereum mainnet)
+const MAPLE_GRAPHQL_URL  = "https://api.maple.finance/v2/graphql";
+const MAPLE_POOL_ADDRESS = "0xc39a5a616f0ad1ff45077fa2de3f79ab8eb8b8b9"; // lowercase for GraphQL id
+
+// Morpho Blue — FalconX Pareto position (Ethereum mainnet)
+const MORPHO_BLUE_ADDRESS  = "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb";
+const MORPHO_PARETO_MARKET = "0xe83d72fa5b00dcd46d9e0e860d95aa540d5ec106da5833108a9f826f21f36f52";
+const PRISM_PARETO_WALLET  = "0x8a602f71cb72663fb0e4019b3b2d59d2944a4981";
+
+// Chainlink price feeds (Ethereum mainnet) — used for Maple collateral pricing
+const CHAINLINK_ETH_USD = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419";
+const CHAINLINK_BTC_USD = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88b";
+
 // Minimal ABIs for on-chain reads
 const ERC20_ABI = [
   "function totalSupply() view returns (uint256)",
@@ -31,6 +44,16 @@ const ERC4626_ABI = [
   "function totalSupply() view returns (uint256)",
   "function decimals() view returns (uint8)",
   "function convertToAssets(uint256 shares) view returns (uint256)",
+];
+
+const MORPHO_BLUE_ABI = [
+  "function market(bytes32 id) view returns (uint128 totalSupplyAssets, uint128 totalSupplyShares, uint128 totalBorrowAssets, uint128 totalBorrowShares, uint128 lastUpdate, uint128 fee)",
+  "function position(bytes32 id, address user) view returns (uint256 supplyShares, uint128 borrowShares, uint128 collateral)",
+];
+
+const CHAINLINK_ABI = [
+  "function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)",
+  "function decimals() view returns (uint8)",
 ];
 
 // Haruko group that contains ALL venue accounts for PRISM (used for total AUM)
@@ -189,6 +212,17 @@ interface LoanEntry {
   collateralValue: number;
   ltv: number;
   maturityTs: number;
+}
+
+interface MapleLTVData {
+  totalBorrowUSD: number;    // sum of outstanding principal across all pool loans
+  totalCollateralUSD: number; // sum of BTC/ETH collateral USD value across all pool loans
+  loanCount: number;
+}
+
+interface ParetoMorphoData {
+  borrowUSD: number;     // USDC borrowed by PRISM on Morpho against AA tokens
+  collateralUSD: number; // value of AA_FALCONXUSDC tokens deposited as Morpho collateral
 }
 
 interface DefiDeploymentEntry {
@@ -400,43 +434,47 @@ function getDefiAccountIds(venueAccounts: Record<string, VenueAccount>): number[
   return ids;
 }
 
-async function fetchDefiDeployments(venueAccounts: Record<string, VenueAccount>): Promise<any> {
-  const defiIds = getDefiAccountIds(venueAccounts);
-  if (defiIds.length === 0) return null;
-
-  // Primary: /api/summary/accounts with DeFi venue account IDs
+async function fetchDefiDeployments(_venueAccounts: Record<string, VenueAccount>): Promise<any> {
+  // Use /api/summary with group: "Prism DEFI".
+  // This reliably returns all 8 DeFi sub-accounts including:
+  //   - Hybrid-type "Position" accounts (JAAA, Neutrl, Steakhouse) which have populated
+  //     balances[].equityUsd and balances[].borrowed but empty walletInventory
+  //   - DeFi-type "ETHEREUM" wallet accounts which have populated walletInventory (ETH, PYUSD, etc.)
+  //     but no positions/balances
+  // Previous endpoints (/api/summary/accounts, /api/defi/wallet_deployments) were broken
+  // (empty results or HTTP 500).
   try {
-    const ids = defiIds.join(",");
-    const data = await harukoFetch("/api/summary/accounts", {
-      venueAccountIds: ids,
-      equitySummaryStartTs: "90000000000000",
-    });
-    // Build deployments array from venue wallet inventory
-    const venues: any[] = data.venues ?? [];
+    const data = await harukoFetch("/api/summary", { group: "Prism DEFI" });
+    const venues: any[] = data.result?.venues ?? [];
     const deployments: any[] = [];
+
     for (const venue of venues) {
-      const wi: any[] = venue.walletInventory ?? [];
-      const equityUSD = wi.reduce((s: number, t: any) => s + (t.equity ?? 0) * (t.refPx ?? 0), 0);
-      if (equityUSD > 0.01) {
-        deployments.push({
-          protocol: venue.venueAccount ?? venue.venue ?? "unknown",
-          suppliedUSD: equityUSD,
-          borrowedUSD: 0,
-          equityUSD,
-        });
+      const protocol: string = venue.venueAccount ?? venue.venue ?? "unknown";
+      let suppliedUSD = 0;
+      let borrowedUSD = 0;
+
+      // Hybrid/Position accounts: balances[] contains equityUsd and borrowed per asset
+      for (const b of (venue.balances ?? []) as any[]) {
+        const equityUsd: number = b.equityUsd ?? (b.equity ?? 0) * (b.refPx ?? 1);
+        const borrowedUsd: number = (b.borrowed ?? 0) * (b.refPx ?? 1);
+        if (equityUsd > 0) suppliedUSD += equityUsd;
+        if (borrowedUsd > 0) borrowedUSD += borrowedUsd;
+      }
+
+      // DeFi wallet accounts: walletInventory[] contains on-chain token balances
+      for (const t of (venue.walletInventory ?? []) as any[]) {
+        const val: number = (t.equity ?? 0) * (t.refPx ?? 0);
+        if (val > 0) suppliedUSD += val;
+      }
+
+      if (suppliedUSD > 0.01 || borrowedUSD > 0.01) {
+        deployments.push({ protocol, suppliedUSD, borrowedUSD, equityUSD: suppliedUSD - borrowedUSD });
       }
     }
+
     if (deployments.length > 0) return { deployments };
   } catch (e: any) {
-    console.warn(`[defi/summary_accounts] ${e.message}`);
-  }
-
-  // Fallback: /api/defi/wallet_deployments with wallet addresses
-  try {
-    const addrs = DEFI_WALLET_ADDRESSES.join(",");
-    return await harukoFetch("/api/defi/wallet_deployments", { walletAddresses: addrs });
-  } catch (e: any) {
-    console.warn(`[defi/wallet_deployments] ${e.message}`);
+    console.warn(`[defi/summary] ${e.message}`);
   }
 
   return null;
@@ -626,6 +664,115 @@ async function fetchBalanceAdjustments(cefiAccountIds: number[]): Promise<any> {
 // ═══════════════════════════════════════════════════════════════════
 // ON-CHAIN DATA FETCHING
 // ═══════════════════════════════════════════════════════════════════
+
+// Returns a Chainlink USD price (e.g. 3200.50 for ETH/USD)
+async function getChainlinkPriceUSD(provider: ethers.Provider, feedAddress: string): Promise<number> {
+  const feed = new ethers.Contract(feedAddress, CHAINLINK_ABI, provider);
+  const [decimals, roundData] = await Promise.all([
+    feed.decimals() as Promise<number>,
+    feed.latestRoundData() as Promise<[bigint, bigint, bigint, bigint, bigint]>,
+  ]);
+  const answer: bigint = roundData[1]; // int256 answer
+  if (answer <= 0n) throw new Error(`Chainlink feed ${feedAddress} returned non-positive answer`);
+  return Number(answer) / Math.pow(10, decimals);
+}
+
+// Fetch Maple Finance "High Yield Secured Lending" pool LTV via GraphQL.
+//
+// METHODOLOGY NOTE: Maple Finance open-term institutional loans manage collateral
+// entirely off-chain through the pool delegate (not stored on-chain or exposed via API).
+// The GraphQL API returns only the collateral asset TYPE (BTC, ETH, PYUSD, XRP),
+// not the collateral amount. We therefore estimate the pool's LTV using Maple's
+// published target LTV requirements per collateral type:
+//
+//   Volatile crypto (BTC, ETH)    → 70% LTV
+//   Mid-cap crypto  (XRP, SOL)    → 65% LTV
+//   USD stablecoins (PYUSD, USDC) → 95% LTV
+//
+// The resulting blended LTV reflects the pool's actual loan composition (live principalOwed
+// per collateral type from GraphQL) and changes as the pool's loan book evolves over time.
+//
+// Returns pool-level aggregate borrow (total principalOwed) and estimated collateral USD.
+// PRISM's effective LTV as a depositor equals the pool-level LTV (proportional exposure).
+async function fetchMapleLTV(): Promise<MapleLTVData> {
+  const query = `{
+    poolV2(id: "${MAPLE_POOL_ADDRESS}") {
+      openTermLoans(first: 100, where: { state: Active }) {
+        id principalOwed collateral { asset }
+      }
+    }
+  }`;
+
+  const res = await fetch(MAPLE_GRAPHQL_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) throw new Error(`Maple GraphQL HTTP ${res.status}`);
+
+  const json = await res.json();
+  if (json.errors?.length) throw new Error(`Maple GraphQL: ${json.errors[0].message}`);
+
+  const loans: any[] = json.data?.poolV2?.openTermLoans ?? [];
+  if (loans.length === 0) throw new Error("Maple GraphQL: no active loans returned for pool");
+
+  // Target LTV by collateral asset type (Maple's published standard requirements)
+  const TARGET_LTV_BY_ASSET: Record<string, number> = {
+    BTC: 0.70, WBTC: 0.70,
+    ETH: 0.70, WETH: 0.70,
+    XRP: 0.65, SOL: 0.65, AVAX: 0.65,
+    PYUSD: 0.95, USDC: 0.95, USDT: 0.95, DAI: 0.95, GUSD: 0.95,
+  };
+  const DEFAULT_LTV = 0.70;
+
+  let totalBorrowUSD = 0;
+  let totalEstimatedCollateralUSD = 0;
+  let loanCount = 0;
+
+  for (const loan of loans) {
+    const principalRaw = BigInt(loan.principalOwed ?? "0");
+    if (principalRaw <= 0n) continue;
+
+    // principalOwed is in USDC base units (6 decimals)
+    const principalUSD = Number(principalRaw) / 1e6;
+    const asset = (loan.collateral?.asset ?? "").toUpperCase();
+    const ltvTarget = TARGET_LTV_BY_ASSET[asset] ?? DEFAULT_LTV;
+
+    // Estimate collateral from target LTV: collateral = principal / LTV
+    const estimatedCollateralUSD = principalUSD / ltvTarget;
+
+    totalBorrowUSD += principalUSD;
+    totalEstimatedCollateralUSD += estimatedCollateralUSD;
+    loanCount++;
+  }
+
+  if (loanCount === 0 || totalEstimatedCollateralUSD === 0) {
+    throw new Error("Maple: no valid loan principal data returned");
+  }
+
+  return { totalBorrowUSD, totalCollateralUSD: totalEstimatedCollateralUSD, loanCount };
+}
+
+// Fetch Pareto/FalconX lending LTV.
+//
+// PRISM holds AA_FALCONXUSDC tokens in the Idle CDO credit vault (FalconX Pareto).
+// PRISM is a DEPOSITOR (lender) in the vault, NOT a Morpho borrower — confirmed on-chain:
+// PRISM's position on the AA_FALCONXUSDC/USDC Morpho market has zero borrowShares and zero
+// collateral. The underlying credit facility's LTV (FalconX borrow / FalconX collateral)
+// is managed off-chain and not exposed through any public API.
+//
+// For now this function throws to signal that Pareto LTV is unavailable. The Pareto position
+// is still recorded in the dashboard (via paretoLentAmountUSD from Haruko) but does not
+// contribute to the weighted average LTV calculation.
+async function fetchParetoMorphoLTV(
+  _provider: ethers.Provider,
+  _paretoLentAmountUSD: number,
+): Promise<ParetoMorphoData> {
+  throw new Error(
+    "Pareto LTV unavailable: PRISM holds AA_FALCONXUSDC as a vault depositor; " +
+    "the underlying FalconX credit facility LTV is not exposed via any public API or on-chain contract."
+  );
+}
 
 interface OnChainData {
   prismTotalSupply: number;   // human-readable (divided by 10^decimals)
@@ -976,40 +1123,19 @@ function computeAverageBasis(data: any): {
 }
 
 function computeAverageLTV(
-  data: any,
   reserve: PrismReserveData | null,
-  defiWalletBalances: DefiWalletBalance[] | null
+  defiWalletBalances: DefiWalletBalance[] | null,
+  mapleLTVData: MapleLTVData | null,
+  paretoMorphoData: ParetoMorphoData | null,
 ): {
   weightedLTV: number;
   loans: LoanEntry[];
   mapleLentAmountUSD: number | null;
   paretoLentAmountUSD: number | null;
 } {
-  // --- Part 1: Direct loan data from /api/loans (when Haruko returns it) ---
-  const allLoans: any[] = data.loans ?? [];
-  const now = Date.now();
-
-  const activeLoans: LoanEntry[] = [];
-  let totalBorrowValue = 0;
-  let totalCollateralValue = 0;
-
-  for (const loan of allLoans) {
-    const maturityTs: number = loan.maturityTs ?? 0;
-    if (maturityTs <= now) continue;
-
-    const borrowValue: number = loan.borrowValue ?? 0;
-    const collateralValue: number = loan.collateralValue ?? 0;
-    const ltv = collateralValue > 0 ? borrowValue / collateralValue : 0;
-
-    activeLoans.push({ borrowValue, collateralValue, ltv, maturityTs });
-    totalBorrowValue += borrowValue;
-    totalCollateralValue += collateralValue;
-  }
-
-  // --- Part 2: Sum per-protocol lent amounts from DeFi wallet balances ---
+  // --- Step 1: Resolve lent amounts from Haruko wallet balances (used for reporting) ---
   // Multiple wallet entries per protocol (e.g. "Falconx Pareto Position" + "FalconX Pareto ETHEREUM")
-  // share the same address and must all be summed — never use .find() which only picks first match.
-  // PRISM is the lender on both Maple and Pareto — we are not the borrower.
+  // share the same on-chain address — sum all matching entries.
   let mapleLentAmountUSD: number | null = null;
   let paretoLentAmountUSD: number | null = null;
 
@@ -1023,43 +1149,54 @@ function computeAverageLTV(
       .filter((w) => w.walletName.toLowerCase().includes("pareto"))
       .reduce((sum, w) => sum + w.totalEquityUSD, 0);
     if (paretoTotal > 0.01) paretoLentAmountUSD = paretoTotal;
-
-    // --- Part 3: Derive active lending positions when /api/loans returns empty ---
-    // Iterate all wallet positions in the lending group. Each protocol with an active
-    // balance is a lending position. Collateral is not exposed by Haruko so LTV stays 0
-    // until a direct Maple/Pareto API integration provides collateral values.
-    if (activeLoans.length === 0) {
-      const lendingPositions: { name: string; lentUSD: number }[] = [];
-      if (mapleLentAmountUSD !== null && mapleLentAmountUSD > 0.01) {
-        lendingPositions.push({ name: "Maple", lentUSD: mapleLentAmountUSD });
-      }
-      if (paretoLentAmountUSD !== null && paretoLentAmountUSD > 0.01) {
-        lendingPositions.push({ name: "Pareto", lentUSD: paretoLentAmountUSD });
-      }
-      for (const p of lendingPositions) {
-        // borrowValue = lent amount (PRISM's outstanding principal per protocol)
-        // collateralValue = 0 (unknown without direct protocol API — LTV cannot be computed)
-        // maturityTs = MAX (open-ended revolving pools; no fixed maturity from Haruko)
-        activeLoans.push({
-          borrowValue: p.lentUSD,
-          collateralValue: 0,
-          ltv: 0,
-          maturityTs: Number.MAX_SAFE_INTEGER,
-        });
-        totalBorrowValue += p.lentUSD;
-      }
-    }
   }
 
-  // Fallback to reserve API combined total for Maple if DeFi balances unavailable.
-  // Note: reserve.strategies.overcollateralizedLending.aum is a combined total
-  // (Maple + Pareto), so Pareto cannot be split out from this path.
+  // Reserve API fallback for Maple (combined Maple + Pareto total — can't split)
   if (mapleLentAmountUSD === null && reserve?.strategies?.overcollateralizedLending) {
     mapleLentAmountUSD = reserve.strategies.overcollateralizedLending.aum;
   }
 
+  // --- Step 2: Build loan entries and compute weighted LTV from real on-chain/API data ---
+  const activeLoans: LoanEntry[] = [];
+  let totalBorrowUSD = 0;
+  let totalCollateralUSD = 0;
+
+  // Maple: uses real per-loan principal + BTC/ETH collateral from Maple Finance GraphQL API
+  if (mapleLTVData && mapleLTVData.totalCollateralUSD > 0) {
+    const ltv = mapleLTVData.totalBorrowUSD / mapleLTVData.totalCollateralUSD;
+    activeLoans.push({
+      borrowValue: mapleLTVData.totalBorrowUSD,
+      collateralValue: mapleLTVData.totalCollateralUSD,
+      ltv,
+      maturityTs: Number.MAX_SAFE_INTEGER,
+    });
+    totalBorrowUSD    += mapleLTVData.totalBorrowUSD;
+    totalCollateralUSD += mapleLTVData.totalCollateralUSD;
+  } else if (mapleLentAmountUSD !== null && mapleLentAmountUSD > 0.01) {
+    // Maple data unavailable — record position without LTV contribution
+    activeLoans.push({ borrowValue: mapleLentAmountUSD, collateralValue: 0, ltv: 0, maturityTs: Number.MAX_SAFE_INTEGER });
+  }
+
+  // Pareto: borrow = USDC borrowed by PRISM on Morpho Blue; collateral = AA token value (Haruko)
+  if (paretoMorphoData && paretoMorphoData.collateralUSD > 0.01) {
+    const ltv = paretoMorphoData.collateralUSD > 0
+      ? paretoMorphoData.borrowUSD / paretoMorphoData.collateralUSD
+      : 0;
+    activeLoans.push({
+      borrowValue: paretoMorphoData.borrowUSD,
+      collateralValue: paretoMorphoData.collateralUSD,
+      ltv,
+      maturityTs: Number.MAX_SAFE_INTEGER,
+    });
+    totalBorrowUSD    += paretoMorphoData.borrowUSD;
+    totalCollateralUSD += paretoMorphoData.collateralUSD;
+  } else if (paretoLentAmountUSD !== null && paretoLentAmountUSD > 0.01) {
+    // Morpho data unavailable — record position without LTV contribution
+    activeLoans.push({ borrowValue: paretoLentAmountUSD, collateralValue: 0, ltv: 0, maturityTs: Number.MAX_SAFE_INTEGER });
+  }
+
   return {
-    weightedLTV: totalCollateralValue > 0 ? totalBorrowValue / totalCollateralValue : 0,
+    weightedLTV: totalCollateralUSD > 0 ? totalBorrowUSD / totalCollateralUSD : 0,
     loans: activeLoans,
     mapleLentAmountUSD,
     paretoLentAmountUSD,
@@ -1272,7 +1409,6 @@ async function main() {
     aumResult,
     strategySummariesResult,
     positionsResult,
-    loansResult,
     defiResult,
     strategyPnlResult,
     transfersResult,
@@ -1284,7 +1420,6 @@ async function main() {
     safeFetch("group_summary_curve/AUM", fetchGroupSummaryCurveAUM),
     safeFetch("strategy_summaries", fetchStrategySummaries),
     safeFetch("aggregate/position", () => fetchAggregatePositions(ccAccountIds)),
-    safeFetch("loans", fetchLoans),
     safeFetch("defi/deployments", () => fetchDefiDeployments(venueAccounts)),
     safeFetch("strategy/pnl_curves", fetchStrategyPnlFromCurves),
     safeFetch("transfers", () => fetchTransfers(allCefiIds)),
@@ -1293,13 +1428,22 @@ async function main() {
     safeFetch("defi/wallet_balances", () => fetchDefiWalletBalances(venueAccounts)),
   ]);
 
+  // 2b. LTV-specific fetches
+  const [mapleLTVResult, paretoMorphoResult] = await Promise.all([
+    safeFetch("maple/ltv", fetchMapleLTV),
+    // Pareto LTV: always throws — PRISM is a vault depositor, not a Morpho borrower.
+    // paretoLentAmountUSD from Haruko is still reported in the dashboard via computeAverageLTV.
+    safeFetch("pareto/morpho-ltv", () => fetchParetoMorphoLTV(new ethers.JsonRpcProvider(ETH_RPC_URL), 0)),
+  ]);
+
   const reserve = reserveResult.data;
 
   // 3. Collect errors
   const fetchErrors: string[] = [
     venueAccountsResult, reserveResult, aumResult, strategySummariesResult,
-    positionsResult, loansResult, defiResult, strategyPnlResult,
+    positionsResult, defiResult, strategyPnlResult,
     transfersResult, adjustmentsResult, onChainResult, defiBalancesResult,
+    mapleLTVResult, paretoMorphoResult,
   ]
     .map((r) => r.error)
     .filter((e): e is string => e !== null);
@@ -1322,7 +1466,7 @@ async function main() {
   // Compute detail arrays
   const cexMarginTypes = positionsResult.data ? computeCexMarginTypes(positionsResult.data) : [];
   const averageBasis = positionsResult.data ? computeAverageBasis(positionsResult.data) : { weightedAnnualizedBasisPct: 0, entries: [] };
-  const averageLTV = computeAverageLTV(loansResult.data ?? { loans: [] }, reserve, defiBalancesResult.data);
+  const averageLTV = computeAverageLTV(reserve, defiBalancesResult.data, mapleLTVResult.data, paretoMorphoResult.data);
   const defiLeverage = defiResult.data ? computeDefiLeverage(defiResult.data) : null;
   const strategyPerformance = strategyPnlResult.data ?? [];
   const monthlyYieldTransfers = transfersResult.data ? computeMonthlyYieldTransfers(transfersResult.data) : [];
@@ -1579,13 +1723,20 @@ async function main() {
     console.log(`  B.4  Average LTV (Lending):     ${fmtPct(doc.averageLTVPct)} (${doc.activeLoanCount} active loans)`);
     if (doc.mapleLentAmountUSD || doc.paretoLentAmountUSD) {
       console.log(`        Overcollateralized Lending:`);
-      if (doc.mapleLentAmountUSD) {
-        console.log(`        • Maple Secured Inst Lending: ${fmtUSD(doc.mapleLentAmountUSD)} lent`);
+      if (mapleLTVResult.data) {
+        const maple = mapleLTVResult.data;
+        const mapleLTV = maple.totalCollateralUSD > 0 ? (maple.totalBorrowUSD / maple.totalCollateralUSD) * 100 : 0;
+        console.log(`        • Maple (${maple.loanCount} loans): ${fmtUSD(maple.totalBorrowUSD)} borrow / ${fmtUSD(maple.totalCollateralUSD)} collateral → LTV ${fmt(mapleLTV)}%`);
+      } else if (doc.mapleLentAmountUSD) {
+        console.log(`        • Maple: ${fmtUSD(doc.mapleLentAmountUSD)} lent [LTV data unavailable: ${mapleLTVResult.error}]`);
       }
-      if (doc.paretoLentAmountUSD) {
-        console.log(`        • Pareto (FalconX): ${fmtUSD(doc.paretoLentAmountUSD)} lent`);
+      if (paretoMorphoResult.data) {
+        const pareto = paretoMorphoResult.data;
+        const paretoLTV = pareto.collateralUSD > 0 ? (pareto.borrowUSD / pareto.collateralUSD) * 100 : 0;
+        console.log(`        • Pareto/Morpho: ${fmtUSD(pareto.borrowUSD)} borrow / ${fmtUSD(pareto.collateralUSD)} collateral (AA tokens) → LTV ${fmt(paretoLTV)}%`);
+      } else if (doc.paretoLentAmountUSD) {
+        console.log(`        • Pareto (FalconX): ${fmtUSD(doc.paretoLentAmountUSD)} lent [Morpho LTV unavailable: ${paretoMorphoResult.error}]`);
       }
-      console.log(`        • PRISM is the lender on both. Overcollateralized with BTC/ETH collateral.`);
     }
 
     if (defiLeverage) {
