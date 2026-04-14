@@ -77,7 +77,7 @@ const STRATEGY_BUCKET_ACCOUNTS: Record<string, string[]> = {
     "Prism Lighter",
     "BitGo Prism Lighter",
     "open_eden_falconx",
-    "Prism Lighter Staked LIT",
+    "Prism Lighter LIT Staking Rewards",
   ],
   "Prism Monarq Operations": [
     "Prism Yield wallet",
@@ -643,8 +643,7 @@ async function fetchBalanceAdjustments(cefiAccountIds: number[]): Promise<any> {
     cefiAccountIds.map(async (id) => {
       try {
         const data = await harukoFetch("/api/balance_adjustments", {
-          venueAccountIds: String(id),
-          type: "FUNDING",
+          venueAccountId: String(id),
           startTs: String(sevenDaysAgo),
           endTs: String(now),
         });
