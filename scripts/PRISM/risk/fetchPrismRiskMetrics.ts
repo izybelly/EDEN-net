@@ -1661,6 +1661,26 @@ async function main() {
     await col.createIndex({ dateKey: 1 });
     await col.createIndex({ date: 1 });
 
+    // ── Upsert today's xPRISM exchange rate into the dedicated history collection ──
+    // This mirrors the backfill collection schema so both are queryable together in Metabase.
+    if (onChain?.xprismExchangeRate != null) {
+      const rateCol = db.collection("xprism_exchange_rate_history");
+      await rateCol.createIndex({ dateKey: 1 }, { unique: true });
+      await rateCol.updateOne(
+        { dateKey },
+        {
+          $set: {
+            dateKey,
+            exchangeRate: onChain.xprismExchangeRate,
+            snapshotId,
+            createdAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+      console.log(`[xprism_exchange_rate_history] Upserted rate=${onChain.xprismExchangeRate.toFixed(8)} for ${dateKey}`);
+    }
+
     // ── Pretty-print full summary ────────────────────────────────────
     const fmt = (n: number | null | undefined, decimals = 2) =>
       n != null ? n.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) : "N/A";
