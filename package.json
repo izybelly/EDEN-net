@@ -24,7 +24,9 @@
     "fetch-prism-redemptions": "node dist/scripts/PRISM/risk/fetchPrismRedemptionRequests.js",
     "fetch-portfolio-balance": "node dist/scripts/PRISM/risk/fetchPortfolioBalanceDetails.js",
     "backfill-xprism-rate": "node dist/scripts/PRISM/risk/backfillXprismExchangeRate.js",
-    "fetch-all": "npm run build && npm run tbill-fetch-tvl && npm run tbill-fetch-mint-redeem && npm run tbill-fetch-unique-holders && npm run fetch-usdo-risk && npm run fetch-prism-risk",
+    "backfill-yield-payout": "node dist/scripts/PRISM/risk/backfillYieldPayoutChecks.js",
+    "fetch-yield-payout": "node dist/scripts/PRISM/risk/fetchYieldPayoutChecks.js",
+    "fetch-all": "npm run build && npm run tbill-fetch-tvl && npm run tbill-fetch-mint-redeem && npm run tbill-fetch-unique-holders && npm run fetch-usdo-risk && npm run fetch-prism-risk && npm run fetch-yield-payout",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

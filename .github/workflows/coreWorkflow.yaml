@@ -41,3 +41,9 @@ jobs:
           DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
           MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
         run: npm run fetch-prism-redemptions
+
+      - name: Fetch xPRISM yield payout checks
+        env:
+          ETH_RPC_URL: ${{ secrets.ETH_RPC_URL }}
+          MONGODB_CONNECTION_STRING: ${{ secrets.MONGODB_CONNECTION_STRING }}
+        run: npm run fetch-yield-payout
